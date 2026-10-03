@@ -40,7 +40,13 @@ CUTLASS_DEVICE float run_mix_task(const Workspace<kNumSplits>& workspace, uint64
         hc_output += gemm_partials[k_split_idx * kNumGemmPartialElementsPerTask +
                                    row_idx * kNumHCOutputs + safe_hc_output_idx];
     hc_output = is_hc_output_lane ? hc_output : 0.0f;
-    const float hc_rms_scale = rsqrtf(hc_norm_sqr_sum * (1.0f / static_cast<float>(kNumRoutes * kHidden)) + mix_args.hc_norm_eps);
+    // Match Maxwell's HC normalization exactly:
+    //   1 / (||x||_2 / sqrt(numel(x)) + eps)
+    // This intentionally differs from rsqrt(mean(x^2) + eps), because Maxwell
+    // adds epsilon after the square root.
+    const float hc_rms = sqrtf(hc_norm_sqr_sum) /
+                         sqrtf(static_cast<float>(kNumRoutes * kHidden));
+    const float hc_rms_scale = 1.0f / (hc_rms + mix_args.hc_norm_eps);
 
     // Warp lanes map to [Pre routes | Post routes | Comb routes x routes | inactive].
     constexpr uint32_t kFirstCombLane = 2 * kNumRoutes;
