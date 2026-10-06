@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 import deep_gemm
@@ -155,9 +157,10 @@ def mhc_reference(
         mixes = new_residual.flatten(1).float() @ fn.mT
     finally:
         torch.backends.cuda.matmul.allow_tf32 = old_allow_tf32
-    hc_sqr_sum = new_residual.float().square().sum((1, 2))
-    mixes *= torch.rsqrt(
-        hc_sqr_sum / (hc_mult * x.size(1)) + hc_norm_eps).unsqueeze(1)
+    hc_norm = new_residual.float().norm(dim=(1, 2))
+    mixes *= (
+        1.0 / (hc_norm / math.sqrt(hc_mult * x.size(1)) + hc_norm_eps)
+    ).unsqueeze(1)
     scales = torch.cat((
         mix_scales[0].expand(hc_mult),
         mix_scales[1].expand(hc_mult),
@@ -243,6 +246,19 @@ def check_correctness(actual, reference, case):
 def test_mega_mhc_api_contract() -> None:
     num_tokens, hidden = 64, 4096
     inputs, _ = make_inputs(num_tokens, hidden, 2026, False)
+
+    # A deliberately large epsilon makes this a regression test for Maxwell's
+    # 1 / (RMS(x) + eps), which differs materially from rsqrt(mean(x^2) + eps).
+    maxwell_norm_eps = 0.25
+    maxwell_norm_outputs = make_outputs(inputs, 'bf16')
+    run_mega_mhc(inputs, maxwell_norm_outputs, hc_norm_eps=maxwell_norm_eps)
+    maxwell_norm_reference = mhc_reference(
+        **{**inputs, 'hc_norm_eps': maxwell_norm_eps})
+    check_correctness(
+        logical_outputs(maxwell_norm_outputs),
+        logical_outputs(maxwell_norm_reference),
+        ('maxwell_hc_norm', num_tokens, hidden),
+    )
 
     # Deterministic mode selects fixed Split-K independently for every invocation
     outputs = make_outputs(inputs, 'bf16')
