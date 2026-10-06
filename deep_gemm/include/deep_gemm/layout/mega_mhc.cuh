@@ -55,6 +55,8 @@ struct MixArgs {
     float hc_post_scale;
     float sinkhorn_eps;
     uint32_t num_sinkhorn_iters;
+    // Maxwell adds HC epsilon outside the square root; DeepSeek adds it inside.
+    bool eps_norm_out;
 };
 
 struct NormArgs {

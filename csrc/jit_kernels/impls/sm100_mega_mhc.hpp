@@ -18,7 +18,8 @@ static void sm100_mega_mhc(
     const torch::Tensor& post_mix, const torch::Tensor& comb_res_mix,
     const std::optional<torch::Tensor>& shifted_prev_mix, const torch::Tensor& fn,
     const torch::Tensor& mix_scales, const torch::Tensor& mix_bases,
-    const float& hc_norm_eps, const float& hc_pre_eps, const float& hc_post_scale,
+    const float& hc_norm_eps, const bool& eps_norm_out,
+    const float& hc_pre_eps, const float& hc_post_scale,
     const float& sinkhorn_eps, const int& num_sinkhorn_iters,
     const torch::Tensor& rmsnorm_weight, const float& rmsnorm_eps,
     const torch::Tensor& new_residual,
@@ -90,6 +91,7 @@ static void sm100_mega_mhc(
         .hc_post_scale = hc_post_scale,
         .sinkhorn_eps = sinkhorn_eps,
         .num_sinkhorn_iters = static_cast<uint32_t>(num_sinkhorn_iters),
+        .eps_norm_out = eps_norm_out,
     };
     const mhc_layout::NormArgs norm_args = {
         .num_tokens = static_cast<uint32_t>(num_tokens),
