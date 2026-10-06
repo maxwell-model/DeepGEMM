@@ -70,6 +70,7 @@ static const torch::Tensor& get_split_barriers(const torch::TensorOptions& optio
  *     y_routed_sf                    [T,H/128] int32 | None
  *     y_shared_sf                    [T,H/128] int32 | None
  *     shared_sf_block_m              int
+ *     eps_norm_out                   bool (default: false)
  *
  * Returns:
  *     None
@@ -85,6 +86,9 @@ static const torch::Tensor& get_split_barriers(const torch::TensorOptions& optio
  *     y_shared_sf together. y_gemm_sf is TMA-aligned column-major,
  *     y_routed_sf is contiguous row-major, and y_shared_sf is the Mega MoE
  *     shared-expert layout and requires shared_sf_block_m > 0.
+ *     eps_norm_out controls HC normalization only: false uses
+ *     rsqrt(mean(x^2) + hc_norm_eps); true uses 1 / (RMS(x) + hc_norm_eps)
+ *     for Maxwell. Output RMSNorm always adds rmsnorm_eps inside the square root.
  */
 static void mega_mhc(const torch::Tensor& x,
                      const torch::Tensor& residual,
@@ -112,7 +116,8 @@ static void mega_mhc(const torch::Tensor& x,
                      const std::optional<torch::Tensor>& y_gemm_sf,
                      const std::optional<torch::Tensor>& y_routed_sf,
                      const std::optional<torch::Tensor>& y_shared_sf,
-                     const int& shared_sf_block_m) {
+                     const int& shared_sf_block_m,
+                     const bool& eps_norm_out) {
     // Shifted state is all-or-nothing; FP8 uses either GEMM SF or routed and shared SF together
     const bool is_shifted = shifted_prev_mix.has_value();
     DG_HOST_ASSERT(is_shifted == new_prev_mix.has_value());
@@ -243,7 +248,7 @@ static void mega_mhc(const torch::Tensor& x,
     sm100_mega_mhc(
         x, residual, post_mix, comb_res_mix, shifted_prev_mix,
         fn, mix_scales, mix_bases,
-        hc_norm_eps, hc_pre_eps, hc_post_scale, sinkhorn_eps, num_sinkhorn_iters,
+        hc_norm_eps, eps_norm_out, hc_pre_eps, hc_post_scale, sinkhorn_eps, num_sinkhorn_iters,
         rmsnorm_weight, rmsnorm_eps,
         new_residual, new_prev_mix, new_post_mix, new_comb_res_mix,
         y_bf16_storage, y_bf16.has_value(), scratch, split_barriers,
@@ -281,7 +286,8 @@ static void register_apis(pybind11::module_& m) {
         py::arg("y_gemm_sf") = std::nullopt,
         py::arg("y_routed_sf") = std::nullopt,
         py::arg("y_shared_sf") = std::nullopt,
-        py::arg("shared_sf_block_m") = 0);
+        py::arg("shared_sf_block_m") = 0,
+        py::arg("eps_norm_out") = false);
 }
 
 } // namespace deep_gemm::mega_mhc

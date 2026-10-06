@@ -143,6 +143,7 @@ def mhc_reference(
     sf_layout: str = 'bf16',
     shared_sf_block_m: int = 0,
     shifted_prev_mix: torch.Tensor | None = None,
+    eps_norm_out: bool = False,
 ) -> dict[str, torch.Tensor]:
     new_residual = x.float().unsqueeze(1) * post_mix
     new_residual += torch.einsum(
@@ -157,10 +158,12 @@ def mhc_reference(
         mixes = new_residual.flatten(1).float() @ fn.mT
     finally:
         torch.backends.cuda.matmul.allow_tf32 = old_allow_tf32
-    hc_norm = new_residual.float().norm(dim=(1, 2))
-    mixes *= (
-        1.0 / (hc_norm / math.sqrt(hc_mult * x.size(1)) + hc_norm_eps)
-    ).unsqueeze(1)
+    if eps_norm_out:
+        hc_norm = new_residual.float().norm(dim=(1, 2))
+        hc_rms_scale = 1.0 / (hc_norm / math.sqrt(hc_mult * x.size(1)) + hc_norm_eps)
+    else:
+        hc_rms_scale = torch.rsqrt(new_residual.float().square().mean(dim=(1, 2)) + hc_norm_eps)
+    mixes *= hc_rms_scale.unsqueeze(1)
     scales = torch.cat((
         mix_scales[0].expand(hc_mult),
         mix_scales[1].expand(hc_mult),
@@ -247,19 +250,6 @@ def test_mega_mhc_api_contract() -> None:
     num_tokens, hidden = 64, 4096
     inputs, _ = make_inputs(num_tokens, hidden, 2026, False)
 
-    # A deliberately large epsilon makes this a regression test for Maxwell's
-    # 1 / (RMS(x) + eps), which differs materially from rsqrt(mean(x^2) + eps).
-    maxwell_norm_eps = 0.25
-    maxwell_norm_outputs = make_outputs(inputs, 'bf16')
-    run_mega_mhc(inputs, maxwell_norm_outputs, hc_norm_eps=maxwell_norm_eps)
-    maxwell_norm_reference = mhc_reference(
-        **{**inputs, 'hc_norm_eps': maxwell_norm_eps})
-    check_correctness(
-        logical_outputs(maxwell_norm_outputs),
-        logical_outputs(maxwell_norm_reference),
-        ('maxwell_hc_norm', num_tokens, hidden),
-    )
-
     # Deterministic mode selects fixed Split-K independently for every invocation
     outputs = make_outputs(inputs, 'bf16')
     deep_gemm.use_deterministic_algorithms(True)
@@ -333,6 +323,44 @@ def test_mega_mhc_api_contract() -> None:
 
 @test_filter(lambda: get_arch_major() == 10)
 @torch.no_grad()
+def test_mega_mhc_eps_norm_out() -> None:
+    # A large epsilon distinguishes RMS + eps from sqrt(mean(x^2) + eps).
+    # Cross a token-block boundary and cover both modes and all output layouts.
+    for is_shifted in (False, True):
+        inputs, _ = make_inputs(65, 4096, 2029, is_shifted)
+        inputs['hc_norm_eps'] = 0.25
+        for sf_layout in ('bf16', 'col', 'extra'):
+            outputs = make_outputs(inputs, sf_layout)
+            run_mega_mhc(inputs, outputs)
+            default_outputs = {
+                name: tensor.clone() for name, tensor in logical_outputs(outputs).items()
+            }
+            for eps_norm_out in (False, True, False):
+                ref_kwargs = dict(
+                    **inputs, eps_norm_out=eps_norm_out, sf_layout=sf_layout,
+                    shared_sf_block_m=outputs.get('shared_sf_block_m', 0))
+                reference = mhc_reference(**ref_kwargs)
+                run_mega_mhc(inputs, outputs, eps_norm_out=eps_norm_out)
+                actual = logical_outputs(outputs)
+                ref = logical_outputs(reference, outputs.get('shared_sf_block_m'))
+                case = ('eps_norm_out', is_shifted, sf_layout, eps_norm_out)
+                check_correctness(actual, ref, case)
+                if not eps_norm_out:
+                    for name, tensor in actual.items():
+                        assert_bitwise_equal(tensor, default_outputs[name], f'Default epsilon placement: {name}')
+                else:
+                    assert not torch.equal(actual['new_post_mix'], default_outputs['new_post_mix'])
+
+                if sf_layout != 'bf16':
+                    # FP8-only shifted calls use BF16 scratch, and must honor the same flag.
+                    run_mega_mhc(inputs, outputs, eps_norm_out=eps_norm_out, y_bf16=None)
+                    actual_fp8 = logical_outputs(outputs)
+                    actual_fp8.pop('y_bf16')
+                    check_correctness(actual_fp8, ref, (*case, 'fp8_only'))
+
+
+@test_filter(lambda: get_arch_major() == 10)
+@torch.no_grad()
 def test_mega_mhc() -> None:
     for is_shifted in (True, False):
         mode = 'shifted' if is_shifted else 'normal'
@@ -376,4 +404,5 @@ def test_mega_mhc() -> None:
 
 if __name__ == '__main__':
     test_mega_mhc_api_contract()
+    test_mega_mhc_eps_norm_out()
     test_mega_mhc()
